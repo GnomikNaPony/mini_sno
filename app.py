@@ -76,7 +76,8 @@ def ai_available():
         response = httpx.get(ollama_url() + '/api/tags', timeout=1.5)
         response.raise_for_status()
         names = {item.get('name') for item in response.json().get('models', [])}
-        return ai_model() in names or ai_model() + ':latest' in names
+        model = ai_model()
+        return model in names or (':' not in model and model + ':latest' in names)
     except Exception:
         return False
 
