@@ -45,6 +45,9 @@ with tempfile.TemporaryDirectory(prefix='sno-browser-') as data:
                 errors = []
                 page.on('pageerror', lambda err: errors.append(str(err)))
                 page.goto(url)
+                page.wait_for_function("() => navigator.serviceWorker && navigator.serviceWorker.getRegistration().then(Boolean)")
+                assert page.locator('link[rel=manifest]').get_attribute('href') == '/manifest.webmanifest'
+                print('Installable PWA shell OK', flush=True)
                 page.locator('#auth-screen').wait_for(state='visible')
                 page.screenshot(path=QA / '01-login-desktop.png', full_page=True)
                 page.get_by_role('button', name='Регистрация', exact=True).click()

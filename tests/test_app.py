@@ -32,6 +32,23 @@ def register(client, email='one@example.org'):
     return response.json()
 
 
+def test_installable_pwa_assets(client):
+    page = client.get('/')
+    assert page.status_code == 200
+    assert 'rel="manifest" href="/manifest.webmanifest"' in page.text
+    assert 'apple-touch-icon' in page.text
+    manifest = client.get('/manifest.webmanifest')
+    assert manifest.status_code == 200
+    assert manifest.headers['content-type'].startswith('application/manifest+json')
+    data = manifest.json()
+    assert data['start_url'] == '/' and data['display'] == 'standalone'
+    assert {icon['sizes'] for icon in data['icons']} == {'192x192', '512x512'}
+    worker = client.get('/service-worker.js')
+    assert worker.status_code == 200 and "url.pathname.startsWith('/api/')" in worker.text
+    assert worker.headers['cache-control'] == 'no-cache'
+    assert client.get('/static/icon-192.png').headers['content-type'] == 'image/png'
+
+
 def seed_article(date='2026-08-01T21:00:00+00:00', image='https://naked-science.ru/test.jpg'):
     item = ('https://naked-science.ru/article/test', 'naked', 'Физики исследовали квантовые частицы', 'Учёные измерили свойства частиц. Результат получен в лабораторном эксперименте.', date, image, 'physics', 'Research team')
     with sno.db() as con:

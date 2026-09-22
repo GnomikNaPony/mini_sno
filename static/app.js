@@ -19,6 +19,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&am
 function icons(root = document) { $$('[data-icon]', root).forEach(el => el.innerHTML = icon(el.dataset.icon)); }
 let state = null, jobs = [], page = 'dialog', authMode = 'login', pollTimer = null, toastTimer = null;
 let jobsSignature = '', settingsDirty = false, polling = false;
+let installPrompt = null;
 const names = {dialog: 'Диалог с редакцией', archive: 'Мои материалы', sources: 'Источники новостей', settings: 'Настройки'};
 
 async function api(path, method = 'GET', body) {
@@ -196,5 +197,17 @@ document.addEventListener('click', async event => {
 for (const id of ['date-from', 'date-to']) $('#' + id).addEventListener('change', () => { $$('[data-period]').forEach(b => b.classList.toggle('selected', b.dataset.period === 'custom')); });
 window.addEventListener('beforeunload', event => { if (settingsDirty) { event.preventDefault(); event.returnValue = ''; } });
 $('#hour-options').innerHTML = Array.from({length: 24}, (_, i) => `<option value="${i}">${String(i).padStart(2, '0')}:00</option>`).join('');
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault(); installPrompt = event; $('#pwa-install').hidden = false;
+});
+$('#pwa-install').addEventListener('click', async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  const choice = await installPrompt.userChoice;
+  if (choice.outcome === 'accepted') toast('«Орбита» установлена');
+  installPrompt = null; $('#pwa-install').hidden = true;
+});
+window.addEventListener('appinstalled', () => { installPrompt = null; $('#pwa-install').hidden = true; });
 icons();
 loadApp().catch(err => { showAuth(); if (!err.message.includes('Войдите')) $('#auth-error').textContent = err.message; });

@@ -692,6 +692,20 @@ def worker():
         wake.clear()
 
 
+@app.get('/manifest.webmanifest')
+def web_manifest():
+    return FileResponse(ROOT / 'static' / 'manifest.webmanifest', media_type='application/manifest+json')
+
+
+@app.get('/service-worker.js')
+def service_worker():
+    return FileResponse(
+        ROOT / 'static' / 'service-worker.js',
+        media_type='application/javascript',
+        headers={'Cache-Control': 'no-cache'},
+    )
+
+
 @app.get('/')
 def index():
     return FileResponse(ROOT / 'static' / 'index.html')
