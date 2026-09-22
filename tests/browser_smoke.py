@@ -21,7 +21,14 @@ with tempfile.TemporaryDirectory(prefix='sno-browser-') as data:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     url = f'http://127.0.0.1:{port}'
-    env = os.environ | {'DATA_DIR': data, 'OPENAI_API_KEY': '', 'ALLOWED_EMAILS': '', 'COOKIE_SECURE': 'false', 'DISABLE_WORKER': '0'}
+    env = os.environ | {
+        'DATA_DIR': data,
+        'AI_PROVIDER': 'none',
+        'OPENAI_API_KEY': '',
+        'ALLOWED_EMAILS': '',
+        'COOKIE_SECURE': 'false',
+        'DISABLE_WORKER': '0',
+    }
     with (QA / 'server.log').open('w') as log:
         proc = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(port)], cwd=ROOT, env=env, stdout=log, stderr=log)
         try:

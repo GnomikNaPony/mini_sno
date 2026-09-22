@@ -15,6 +15,9 @@ import app as sno
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(sno, 'DATA', tmp_path)
     monkeypatch.setenv('DISABLE_WORKER', '1')
+    monkeypatch.setenv('AI_PROVIDER', 'none')
+    monkeypatch.delenv('OLLAMA_MODEL', raising=False)
+    monkeypatch.delenv('OLLAMA_BASE_URL', raising=False)
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('OPENAI_MODEL', raising=False)
     monkeypatch.delenv('OPENAI_REASONING_EFFORT', raising=False)
@@ -163,32 +166,44 @@ def test_ai_style_and_provider_failure(client, monkeypatch):
         articles = [dict(con.execute('SELECT * FROM articles').fetchone())]
     settings = sno.DEFAULT_SETTINGS | {'examples': 'Наш фирменный пример', 'style_notes': 'Обращаться на вы'}
     job = {'date_from': '2026-08-01', 'date_to': '2026-08-02'}
-    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-never-used-on-network')
     requests = []
 
-    def fake_post(url, **kwargs):
+    def fake_ollama(url, **kwargs):
+        requests.append(kwargs['json'])
+        return sno.httpx.Response(200, request=sno.httpx.Request('POST', url), json={'done': True, 'done_reason': 'stop', 'message': {'content': 'Проверенный русский пост. ' * 12}})
+
+    monkeypatch.setenv('AI_PROVIDER', 'ollama')
+    monkeypatch.setattr(sno.httpx, 'post', fake_ollama)
+    text, mode, warning = sno.write_post(articles, settings, job)
+    assert mode == 'ai' and not warning and 'Источники:' in text
+    assert 'Наш фирменный пример' in requests[0]['messages'][1]['content']
+    assert requests[0]['model'] == sno.DEFAULT_OLLAMA_MODEL
+    assert requests[0]['think'] is False and requests[0]['stream'] is False
+    assert requests[0]['options']['num_ctx'] == 8192
+
+    def fake_openai(url, **kwargs):
         requests.append(kwargs['json'])
         return sno.httpx.Response(200, request=sno.httpx.Request('POST', url), json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'Проверенный русский пост. ' * 12}]}]})
 
-    monkeypatch.setattr(sno.httpx, 'post', fake_post)
-    text, mode, warning = sno.write_post(articles, settings, job)
-    assert mode == 'ai' and not warning and 'Источники:' in text
-    assert 'Наш фирменный пример' in requests[0]['input'] and requests[0]['store'] is False
-    assert requests[0]['model'] == sno.DEFAULT_MODEL
-    assert requests[0]['reasoning'] == {'effort': 'low'}
-    assert requests[0]['max_output_tokens'] == 6000
-
+    monkeypatch.setenv('AI_PROVIDER', 'openai')
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-never-used-on-network')
+    monkeypatch.setattr(sno.httpx, 'post', fake_openai)
+    sno.write_post(articles, settings, job)
+    assert requests[-1]['model'] == sno.DEFAULT_OPENAI_MODEL
+    assert requests[-1]['reasoning'] == {'effort': 'low'}
+    assert requests[-1]['max_output_tokens'] == 6000
     monkeypatch.setenv('OPENAI_MODEL', 'gpt-4.1-mini')
     sno.write_post(articles, settings, job)
     assert requests[-1]['model'] == 'gpt-4.1-mini' and 'reasoning' not in requests[-1]
     monkeypatch.setenv('OPENAI_REASONING_EFFORT', '')
-    monkeypatch.setenv('OPENAI_MODEL', sno.DEFAULT_MODEL)
+    monkeypatch.setenv('OPENAI_MODEL', sno.DEFAULT_OPENAI_MODEL)
     sno.write_post(articles, settings, job)
     assert 'reasoning' not in requests[-1]
 
     def incomplete(url, **kwargs):
-        return sno.httpx.Response(200, request=sno.httpx.Request('POST', url), json={'status': 'incomplete', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'Незаконченный текст. ' * 12}]}]})
+        return sno.httpx.Response(200, request=sno.httpx.Request('POST', url), json={'done': False, 'done_reason': 'length', 'message': {'content': 'Незаконченный текст. ' * 12}})
 
+    monkeypatch.setenv('AI_PROVIDER', 'ollama')
     monkeypatch.setattr(sno.httpx, 'post', incomplete)
     text, mode, warning = sno.write_post(articles, settings, job)
     assert mode == 'digest' and warning and 'Незаконченный текст' not in text
