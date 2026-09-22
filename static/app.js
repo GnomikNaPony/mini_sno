@@ -48,6 +48,12 @@ function changeAuth(mode) {
   const register = mode === 'register';
   $('#name-field').hidden = !register;
   $('#auth-form').elements.name.required = register;
+  const identity = $('#auth-form').elements.email;
+  identity.type = register ? 'email' : 'text';
+  identity.placeholder = register ? 'you@university.ru' : 'KIKO или you@university.ru';
+  $('#identity-label').textContent = register ? 'Электронная почта' : 'Логин или электронная почта';
+  $('#auth-form').elements.password.minLength = register ? 10 : 1;
+  $('#auth-form').elements.password.placeholder = register ? 'Не менее 10 символов' : 'Введите пароль';
   $('#auth-form').elements.password.autocomplete = register ? 'new-password' : 'current-password';
   $('#auth-title').textContent = register ? 'Своя орбита открытий' : 'Рады видеть вас';
   $('#auth-subtitle').textContent = register ? 'Создайте аккаунт для вашего научного общества.' : 'Войдите, чтобы продолжить работу над постами.';
@@ -74,7 +80,7 @@ function setPeriod(days) {
 }
 function renderState(fill = false) {
   const {user, settings: s} = state;
-  $('#user-name').textContent = user.name; $('#user-email').textContent = user.email; $('#user-avatar').textContent = user.name[0].toUpperCase();
+  $('#user-name').textContent = user.name; $('#user-email').textContent = user.username && !user.username.includes('@') ? '@' + user.username : user.email; $('#user-avatar').textContent = user.name[0].toUpperCase();
   $('#next-run').textContent = s.weekly_enabled && state.next_run ? new Intl.DateTimeFormat('ru-RU', {day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow'}).format(new Date(state.next_run)) : 'Когда вам удобно';
   $('#schedule-caption').textContent = s.weekly_enabled ? 'Раз в неделю · за 7 предыдущих дней · МСК' : 'Расписание на паузе. Создавайте посты по кнопке.';
   $('#schedule-badge').textContent = s.weekly_enabled ? 'По расписанию' : 'На паузе';

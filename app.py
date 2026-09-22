@@ -114,7 +114,7 @@ def initialize():
     with db() as con:
         con.execute('PRAGMA journal_mode=WAL')
         con.executescript('''
-        CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT NOT NULL, settings TEXT NOT NULL, next_run TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, username TEXT, password TEXT NOT NULL, settings TEXT NOT NULL, next_run TEXT, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, date_from TEXT NOT NULL, date_to TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '{}', error TEXT, settings TEXT NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_job ON jobs(user_id) WHERE status IN ('queued','running');
@@ -123,6 +123,11 @@ def initialize():
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset REAL NOT NULL);
         ''')
+        columns = {row['name'] for row in con.execute('PRAGMA table_info(users)')}
+        if 'username' not in columns:
+            con.execute('ALTER TABLE users ADD COLUMN username TEXT')
+        con.execute('UPDATE users SET username=email WHERE username IS NULL OR username=""')
+        con.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username COLLATE NOCASE)')
         con.execute("UPDATE jobs SET status='queued' WHERE status='running'")
 
 
@@ -138,6 +143,16 @@ class Auth(BaseModel):
         if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
             raise ValueError('Укажите корректный email')
         return value
+
+
+class Login(BaseModel):
+    email: str = Field(min_length=2, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator('email')
+    @classmethod
+    def login_valid(cls, value):
+        return value.strip().lower()
 
 
 class Settings(BaseModel):
@@ -209,7 +224,7 @@ def current_user(request: Request):
 
 
 def public_user(user):
-    return {key: user[key] for key in ('id', 'name', 'email')}
+    return {key: user[key] for key in ('id', 'name', 'email', 'username')}
 
 
 def auth_limit(request, email):
@@ -277,24 +292,24 @@ def register(body: Auth, request: Request, response: Response):
     allowed = {e.strip().lower() for e in os.getenv('ALLOWED_EMAILS', '').split(',') if e.strip()}
     if allowed and body.email not in allowed:
         raise HTTPException(403, 'Этот email пока не приглашён. Обратитесь к организатору.')
-    user = {'id': secrets.token_hex(16), 'name': body.name.strip(), 'email': body.email}
+    user = {'id': secrets.token_hex(16), 'name': body.name.strip(), 'email': body.email, 'username': body.email}
     try:
         with db() as con:
-            con.execute('INSERT INTO users VALUES (?,?,?,?,?,?,?)', (user['id'], user['name'], user['email'], password_hash(body.password), json.dumps(DEFAULT_SETTINGS, ensure_ascii=False), next_run(DEFAULT_SETTINGS), now().isoformat()))
+            con.execute('INSERT INTO users(id,name,email,username,password,settings,next_run,created_at) VALUES (?,?,?,?,?,?,?,?)', (user['id'], user['name'], user['email'], user['username'], password_hash(body.password), json.dumps(DEFAULT_SETTINGS, ensure_ascii=False), next_run(DEFAULT_SETTINGS), now().isoformat()))
     except sqlite3.IntegrityError:
         raise HTTPException(409, 'Аккаунт с таким email уже существует')
     return issue_session(user, response)
 
 
 @app.post('/api/login')
-def login(body: Auth, request: Request, response: Response):
+def login(body: Login, request: Request, response: Response):
     auth_limit(request, body.email)
     with db() as con:
-        row = con.execute('SELECT * FROM users WHERE email=?', (body.email,)).fetchone()
+        row = con.execute('SELECT * FROM users WHERE lower(email)=? OR lower(username)=?', (body.email, body.email)).fetchone()
     stored = row['password'] if row else password_hash('dummy-login-password', '00' * 16)
     check = password_hash(body.password, stored.split(':')[0])
     if not row or not hmac.compare_digest(check, stored):
-        raise HTTPException(401, 'Неверный email или пароль')
+        raise HTTPException(401, 'Неверный логин, email или пароль')
     return issue_session(row, response)
 
 

@@ -76,6 +76,7 @@ def test_registration_login_sessions_and_private_files(client, monkeypatch):
     assert client.post('/api/register', json={'name': 'A', 'email': 'a@b.co', 'password': '123'}).status_code == 422
     user = register(client)
     assert 'password' not in user
+    assert user['username'] == 'one@example.org'
     assert client.cookies.get('sno_session')
     assert client.get('/api/me').json()['user']['email'] == 'one@example.org'
     jid = finish_job(client, monkeypatch)
@@ -88,6 +89,8 @@ def test_registration_login_sessions_and_private_files(client, monkeypatch):
     assert set(archive.namelist()) == {'cover.jpg', 'photo-01.jpg', 'sources-and-credits.txt'}
     assert archive.testzip() is None
     assert 'Research team' in archive.read('sources-and-credits.txt').decode()
+    with sno.db() as con:
+        con.execute("UPDATE users SET username='KIKO' WHERE id=?", (user['id'],))
     client.post('/api/logout')
     assert client.get(f'/api/jobs/{jid}/post.txt').status_code == 401
     register(client, 'two@example.org')
@@ -95,8 +98,8 @@ def test_registration_login_sessions_and_private_files(client, monkeypatch):
     assert client.get(f'/api/jobs/{jid}/post.txt').status_code == 404
     assert client.get(f'/api/jobs/{jid}/cover.jpg').status_code == 404
     client.post('/api/logout')
-    assert client.post('/api/login', json={'email': 'one@example.org', 'password': 'incorrect-password'}).status_code == 401
-    assert client.post('/api/login', json={'email': 'one@example.org', 'password': 'test-pass-very-long'}).status_code == 200
+    assert client.post('/api/login', json={'email': 'KIKO', 'password': 'bad'}).status_code == 401
+    assert client.post('/api/login', json={'email': 'kiko', 'password': 'test-pass-very-long'}).status_code == 200
     assert client.get('/api/jobs').json()[0]['id'] == jid
     with sno.db() as con:
         stored = con.execute('SELECT password FROM users WHERE id=?', (user['id'],)).fetchone()[0]
