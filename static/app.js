@@ -20,6 +20,7 @@ function icons(root = document) { $$('[data-icon]', root).forEach(el => el.inner
 let state = null, jobs = [], page = 'dialog', authMode = 'login', pollTimer = null, toastTimer = null;
 let jobsSignature = '', settingsDirty = false, polling = false;
 let installPrompt = null;
+let customSourcesDraft = [];
 const names = {dialog: 'Диалог с редакцией', archive: 'Мои материалы', sources: 'Источники новостей', settings: 'Настройки'};
 
 async function api(path, method = 'GET', body) {
@@ -78,6 +79,12 @@ function setPeriod(days) {
   const start = new Date(end + 'T12:00:00Z'); start.setUTCDate(start.getUTCDate() - days + 1);
   $('#date-from').value = start.toISOString().slice(0, 10); $('#date-to').value = end;
 }
+function selectedSourceIds() { return $$('input[name="sources"]', $('#source-options')).filter(input => input.checked).map(input => input.value); }
+function renderSourceOptions(selected = state.settings.sources) {
+  const catalog = {...state.sources};
+  for (const source of customSourcesDraft) catalog[source.id] = source;
+  $('#source-options').innerHTML = Object.entries(catalog).map(([key, src]) => `<div class="source-option"><label><input type="checkbox" name="sources" value="${esc(key)}" ${selected.includes(key) ? 'checked' : ''}>${esc(src.name)}${src.custom ? '<span class="custom-source-tag">свой</span>' : ''}</label>${src.custom ? `<button type="button" class="remove-source" data-remove-source="${esc(key)}" aria-label="Удалить источник ${esc(src.name)}">Удалить</button>` : ''}</div>`).join('');
+}
 function renderState(fill = false) {
   const {user, settings: s} = state;
   $('#user-name').textContent = user.name; $('#user-email').textContent = user.username && !user.username.includes('@') ? '@' + user.username : user.email; $('#user-avatar').textContent = user.name[0].toUpperCase();
@@ -91,17 +98,20 @@ function renderState(fill = false) {
   $('#ai-status').textContent = state.ai_enabled ? `ИИ-редактор: ${state.ai_model} (${provider}). Модель доступна; правила и примеры учитываются при создании текста.` : `Выбран ИИ-редактор ${state.ai_model || provider}, но модель сейчас недоступна. Будет создан обычный дайджест. Проверьте настройки сервера.`;
   $('#sources-list').innerHTML = Object.entries(state.sources).map(([key, src]) => {
     const status = state.collection?.sources[key];
-    return `<article class="source-card"><span class="source-symbol">${key === 'naked' ? 'N' : 'э'}</span><h2>${esc(src.name)}</h2><p>${esc(src.description)}</p><p class="source-status">${status ? status.ok ? `● Лента доступна · ${status.count} публикаций в последнем чтении` : '○ Временно недоступен — используем архив' : '○ Ожидает первого чтения'}</p><a href="${esc(src.home)}" target="_blank" rel="noopener noreferrer">Открыть издание ↗</a></article>`;
+    const symbol = src.symbol || src.name.slice(0, 2);
+    return `<article class="source-card"><span class="source-symbol">${esc(symbol)}</span><h2>${esc(src.name)}</h2><p>${esc(src.description)}</p><p class="source-status">${status ? status.ok ? `● Лента доступна · ${status.count} публикаций в последнем чтении` : '○ Временно недоступен — используем архив' : '○ Ожидает первого чтения'}</p><a href="${esc(src.home)}" target="_blank" rel="noopener noreferrer">Открыть издание ↗</a></article>`;
   }).join('');
   $('#archive-coverage').textContent = state.archive.count ? `В архиве ${state.archive.count} публикаций: с ${dateLabel(state.archive.oldest, true)} по ${dateLabel(state.archive.newest, true)}. ` + (state.collection ? 'Последняя проверка: ' + new Intl.DateTimeFormat('ru-RU', {dateStyle: 'short', timeStyle: 'short', timeZone: 'Europe/Moscow'}).format(new Date(state.collection.at)) + ' МСК.' : '') : 'Архив пока пуст. Первое чтение источников начнётся автоматически.';
   if (fill) {
     const form = $('#settings-form');
+    customSourcesDraft = (s.custom_sources || []).map(source => ({...source}));
     for (const [key, value] of Object.entries(s)) {
       const input = form.elements.namedItem(key);
-      if (input) { if (input.type === 'checkbox') input.checked = value; else input.value = value; }
+      if (input && !Array.isArray(value)) { if (input.type === 'checkbox') input.checked = value; else input.value = value; }
     }
-    $('#source-options').innerHTML = Object.entries(state.sources).map(([key, src]) => `<label><input type="checkbox" name="sources" value="${key}" ${s.sources.includes(key) ? 'checked' : ''}>${esc(src.name)}</label>`).join('');
+    renderSourceOptions(s.sources);
     $('#topic-options').innerHTML = Object.entries(state.topics).map(([key, name]) => `<label><input type="checkbox" name="topics" value="${key}" ${s.topics.includes(key) ? 'checked' : ''}>${esc(name)}</label>`).join('');
+    $('#custom-source-name').value = ''; $('#custom-source-url').value = ''; $('#custom-source-message').textContent = '';
     settingsDirty = false;
   }
 }
@@ -140,7 +150,12 @@ async function poll() {
   try {
     await refreshJobs();
     const latest = await api('/me');
-    if (state) { state = latest; renderState(false); }
+    if (state) {
+      const pendingSources = settingsDirty ? state.sources : null;
+      state = latest;
+      if (pendingSources) state.sources = {...state.sources, ...pendingSources};
+      renderState(false);
+    }
     $('#connection-warning')?.remove();
   } catch (err) {
     if (state && !$('#connection-warning')) {
@@ -177,15 +192,35 @@ $('#generate-form').addEventListener('submit', async event => {
   } catch (err) { $('#generate-error').textContent = err.message; button.disabled = jobs.some(j => ['queued', 'running'].includes(j.status)); }
 });
 $('#settings-form').addEventListener('input', () => { settingsDirty = true; $('#settings-message').textContent = 'Есть несохранённые изменения'; });
+$('#add-source').addEventListener('click', async () => {
+  const button = $('#add-source');
+  const name = $('#custom-source-name').value.trim();
+  const url = $('#custom-source-url').value.trim();
+  const message = $('#custom-source-message');
+  if (!url) { message.textContent = 'Вставьте HTTPS-ссылку на RSS или Atom.'; $('#custom-source-url').focus(); return; }
+  if (customSourcesDraft.length >= 10) { message.textContent = 'Можно добавить не более 10 своих источников.'; return; }
+  button.disabled = true; message.textContent = 'Проверяем ленту…';
+  try {
+    const preview = await api('/sources/preview', 'POST', {name, url});
+    if (customSourcesDraft.some(source => source.id === preview.id)) throw new Error('Этот источник уже добавлен.');
+    const {count, ...source} = preview;
+    const selected = [...new Set([...selectedSourceIds(), source.id])];
+    customSourcesDraft.push(source); state.sources[source.id] = source; renderSourceOptions(selected);
+    $('#custom-source-name').value = ''; $('#custom-source-url').value = '';
+    settingsDirty = true; $('#settings-message').textContent = 'Есть несохранённые изменения';
+    message.textContent = `Добавлено: ${source.name}. Найдено публикаций: ${count}. Сохраните настройки.`;
+  } catch (err) { message.textContent = err.message; }
+  finally { button.disabled = false; }
+});
 $('#settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = $('button[type=submit]', event.target); button.disabled = true;
   const f = new FormData(event.target);
   const settings = Object.fromEntries(f);
   for (const key of ['weekday', 'hour', 'article_count']) settings[key] = Number(settings[key]);
-  settings.weekly_enabled = f.has('weekly_enabled'); settings.sources = f.getAll('sources'); settings.topics = f.getAll('topics');
+  settings.weekly_enabled = f.has('weekly_enabled'); settings.sources = f.getAll('sources'); settings.custom_sources = customSourcesDraft; settings.topics = f.getAll('topics');
   try {
     if (!settings.sources.length) throw new Error('Выберите хотя бы один источник');
-    const result = await api('/settings', 'PUT', settings); state.settings = result.settings; state.next_run = result.next_run; renderState(true);
+    const result = await api('/settings', 'PUT', settings); state.settings = result.settings; state.next_run = result.next_run; state.sources = result.sources; renderState(true);
     $('#settings-message').textContent = 'Настройки сохранены'; toast('Всё сохранено');
   } catch (err) { $('#settings-message').textContent = err.message; toast(err.message, true); }
   finally { button.disabled = false; }
@@ -199,6 +234,13 @@ document.addEventListener('click', async event => {
   if (copy) { try { await navigator.clipboard.writeText(jobs.find(j => j.id === copy.dataset.copy).body); toast('Текст скопирован'); } catch { toast('Не удалось скопировать. Скачайте текстовый файл.', true); } }
   const retry = event.target.closest('[data-retry]');
   if (retry) { const job = jobs.find(j => j.id === retry.dataset.retry); setPage('dialog'); $('#date-from').value = job.date_from; $('#date-to').value = job.date_to; $$('[data-period]').forEach(b => b.classList.toggle('selected', b.dataset.period === 'custom')); $('#generate-form').requestSubmit(); }
+  const remove = event.target.closest('[data-remove-source]');
+  if (remove) {
+    const selected = selectedSourceIds().filter(key => key !== remove.dataset.removeSource);
+    customSourcesDraft = customSourcesDraft.filter(source => source.id !== remove.dataset.removeSource);
+    delete state.sources[remove.dataset.removeSource]; renderSourceOptions(selected);
+    settingsDirty = true; $('#settings-message').textContent = 'Есть несохранённые изменения'; $('#custom-source-message').textContent = 'Источник будет удалён после сохранения.';
+  }
 });
 for (const id of ['date-from', 'date-to']) $('#' + id).addEventListener('change', () => { $$('[data-period]').forEach(b => b.classList.toggle('selected', b.dataset.period === 'custom')); });
 window.addEventListener('beforeunload', event => { if (settingsDirty) { event.preventDefault(); event.returnValue = ''; } });

@@ -35,6 +35,7 @@ def register(client, email='one@example.org'):
 def test_installable_pwa_assets(client):
     page = client.get('/')
     assert page.status_code == 200
+    assert 'no-store' in page.headers['cache-control']
     assert 'rel="manifest" href="/manifest.webmanifest"' in page.text
     assert 'apple-touch-icon' in page.text
     manifest = client.get('/manifest.webmanifest')
@@ -177,6 +178,30 @@ def test_feed_parser_dates_html_and_images():
     assert '<b>' not in parsed[0][3]
     assert parsed[0][4] == '2026-08-01T22:00:00+00:00'
     assert parsed[0][5] == 'https://naked-science.ru/a.jpg'
+
+
+def test_custom_rss_preview_save_and_private_address_block(client, monkeypatch):
+    register(client)
+    raw = b'''<rss><channel><title>University Science</title><item><title>New laboratory result</title><link>https://science.example.org/result</link><pubDate>Sun, 02 Aug 2026 01:00:00 +0300</pubDate><description>Researchers published a result.</description></item></channel></rss>'''
+    monkeypatch.setattr(sno, 'fetch_public', lambda *args, **kwargs: raw)
+    preview = client.post('/api/sources/preview', json={'name': '', 'url': 'https://science.example.org/feed.xml'})
+    assert preview.status_code == 200, preview.text
+    source = preview.json()
+    assert source['name'] == 'University Science' and source['custom'] is True and source['count'] == 1
+
+    settings = client.get('/api/me').json()['settings']
+    saved_source = {key: value for key, value in source.items() if key != 'count'}
+    response = client.put('/api/settings', json=settings | {'sources': ['naked', source['id']], 'custom_sources': [saved_source]})
+    assert response.status_code == 200, response.text
+    assert response.json()['sources'][source['id']]['name'] == 'University Science'
+    persisted = client.get('/api/me').json()
+    assert persisted['settings']['custom_sources'][0]['id'] == source['id']
+    assert source['id'] in persisted['sources']
+
+    assert client.post('/api/sources/preview', json={'name': 'Local', 'url': 'https://127.0.0.1/feed'}).status_code == 422
+    monkeypatch.setattr(sno.socket, 'getaddrinfo', lambda *args, **kwargs: [(2, 1, 6, '', ('127.0.0.1', 443))])
+    with pytest.raises(ValueError, match='локальный'):
+        sno.validate_remote_url('https://science.example.org/feed.xml', allowed_hosts=None, https_only=True)
 
 
 def test_ai_style_and_provider_failure(client, monkeypatch):

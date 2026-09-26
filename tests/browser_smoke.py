@@ -60,9 +60,15 @@ with tempfile.TemporaryDirectory(prefix='sno-browser-') as data:
                 page.screenshot(path=QA / '02-dialog-desktop.png', full_page=True)
                 print('Registration and desktop dashboard OK', flush=True)
                 page.locator('nav').get_by_role('button', name='Настройки', exact=True).click()
+                assert page.locator('#source-options input[name=sources]').count() == 9
                 page.get_by_label('Название общества', exact=True).fill('Научное общество университета')
                 page.get_by_label('Ссылка на сообщество ВК').fill('https://vk.com/science_example')
                 page.locator('textarea[name=examples]').fill('Наука начинается с вопроса. Обсудим новое исследование вместе!')
+                page.locator('#custom-source-name').fill('ESA Space Science')
+                page.locator('#custom-source-url').fill('https://www.esa.int/rssfeed/Our_Activities/Space_Science')
+                page.get_by_role('button', name='Проверить и добавить').click()
+                page.locator('#custom-source-message').get_by_text('Добавлено: ESA Space Science').wait_for(timeout=30000)
+                assert page.locator('#source-options input[name=sources]').count() == 10
                 page.get_by_label('Включить еженедельную подборку').uncheck()
                 page.get_by_role('button', name='Сохранить настройки').click()
                 page.locator('#settings-message').get_by_text('Настройки сохранены').wait_for()
@@ -72,6 +78,7 @@ with tempfile.TemporaryDirectory(prefix='sno-browser-') as data:
                 page.locator('nav').get_by_role('button', name='Настройки', exact=True).click()
                 assert page.get_by_label('Название общества', exact=True).input_value() == 'Научное общество университета'
                 assert not page.get_by_label('Включить еженедельную подборку').is_checked()
+                assert page.get_by_role('checkbox', name='ESA Space Science свой').is_checked()
                 page.screenshot(path=QA / '03-settings-desktop.png', full_page=True)
                 page.locator('nav').get_by_role('button', name='Диалог с редакцией').click()
                 page.get_by_role('button', name='Создать пост', exact=False).click()
@@ -92,6 +99,7 @@ with tempfile.TemporaryDirectory(prefix='sno-browser-') as data:
                     print('ZIP validated:', archive.namelist(), flush=True)
                 page.locator('nav').get_by_role('button', name='Источники новостей').click()
                 page.get_by_role('heading', name='Naked Science').wait_for()
+                page.get_by_role('heading', name='ESA Space Science').wait_for()
                 page.screenshot(path=QA / '05-sources-desktop.png', full_page=True)
                 page.locator('nav').get_by_role('button', name='Мои материалы').click()
                 page.get_by_role('heading', name='Материалы для нового поста готовы').wait_for()

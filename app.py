@@ -2,11 +2,13 @@
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import threading
 import time
@@ -36,11 +38,19 @@ DEFAULT_PROVIDER = 'ollama'
 DEFAULT_OLLAMA_MODEL = 'qwen3.5:9b'
 DEFAULT_OPENAI_MODEL = 'gpt-5.4-mini-2026-03-17'
 SOURCES = {
-    'naked': {'name': 'Naked Science', 'url': 'https://naked-science.ru/feed', 'home': 'https://naked-science.ru', 'description': 'Исследования, открытия и технологии'},
-    'elementy': {'name': 'Элементы', 'url': 'https://elementy.ru/rss/news', 'home': 'https://elementy.ru', 'description': 'Подробно о фундаментальной науке'},
+    'naked': {'name': 'Naked Science', 'url': 'https://naked-science.ru/feed', 'home': 'https://naked-science.ru', 'description': 'Исследования, открытия и технологии', 'symbol': 'N'},
+    'elementy': {'name': 'Элементы', 'url': 'https://elementy.ru/rss/news', 'home': 'https://elementy.ru', 'description': 'Подробно о фундаментальной науке', 'symbol': 'э'},
+    'nplus1': {'name': 'N+1', 'url': 'https://nplus1.ru/rss', 'home': 'https://nplus1.ru', 'description': 'Новости науки, техники и технологий', 'symbol': 'N+'},
+    'nkj': {'name': 'Наука и жизнь', 'url': 'https://www.nkj.ru/rss/', 'home': 'https://www.nkj.ru', 'description': 'Научные новости и популярные объяснения', 'symbol': 'Н'},
+    'postnauka': {'name': 'ПостНаука', 'url': 'https://postnauka.org/feed', 'home': 'https://postnauka.org', 'description': 'Материалы учёных и научные разборы', 'symbol': 'П'},
+    'phys': {'name': 'Phys.org', 'url': 'https://phys.org/rss-feed/', 'home': 'https://phys.org', 'description': 'Международные новости исследований на английском', 'symbol': 'P'},
+    'sciencedaily': {'name': 'ScienceDaily', 'url': 'https://www.sciencedaily.com/rss/all.xml', 'home': 'https://www.sciencedaily.com', 'description': 'Международные исследования из разных областей науки', 'symbol': 'SD'},
+    'nasa': {'name': 'NASA', 'url': 'https://www.nasa.gov/feed/', 'home': 'https://www.nasa.gov', 'description': 'Космос, миссии и исследования NASA на английском', 'symbol': 'N'},
+    'bbcscience': {'name': 'BBC Science & Environment', 'url': 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml', 'home': 'https://www.bbc.com/news/science_and_environment', 'description': 'Наука, климат и окружающая среда на английском', 'symbol': 'B'},
 }
+BUILTIN_HOSTS = {urlsplit(item[field]).hostname for item in SOURCES.values() for field in ('url', 'home')}
 TOPICS = {'space': ('Космос', 'космо астроном планет звезд звёзд галакт комет вселен'), 'biology': ('Биология', 'биолог клетк геном генет животн вирус бактер эволюц'), 'physics': ('Физика', 'физик квант фотон частиц кристалл энерг'), 'tech': ('Технологии', 'технолог робот искусствен интеллект алгоритм компьютер'), 'earth': ('Земля', 'климат океан ледник геолог экологи айсберг')}
-DEFAULT_SETTINGS = {'community_url': '', 'community_name': 'Студенческое научное общество', 'style_notes': 'Дружелюбно и понятно. Короткие абзацы, без кликбейта. Объяснять, почему открытие интересно студентам.', 'examples': '', 'accent': '#476b51', 'sources': list(SOURCES), 'topics': [], 'weekly_enabled': True, 'weekday': 0, 'hour': 10, 'article_count': 3}
+DEFAULT_SETTINGS = {'community_url': '', 'community_name': 'Студенческое научное общество', 'style_notes': 'Дружелюбно и понятно. Короткие абзацы, без кликбейта. Объяснять, почему открытие интересно студентам.', 'examples': '', 'accent': '#476b51', 'sources': list(SOURCES), 'custom_sources': [], 'topics': [], 'weekly_enabled': True, 'weekday': 0, 'hour': 10, 'article_count': 3}
 log = logging.getLogger('sno')
 stop = threading.Event()
 wake = threading.Event()
@@ -155,13 +165,60 @@ class Login(BaseModel):
         return value.strip().lower()
 
 
+def custom_source_url(value):
+    value = value.strip()
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or '').lower().rstrip('.')
+    if parsed.scheme != 'https' or not hostname or parsed.username or parsed.password or parsed.port not in {None, 443}:
+        raise ValueError('Укажите публичный HTTPS-адрес RSS или Atom')
+    if hostname == 'localhost' or hostname.endswith('.local'):
+        raise ValueError('Локальные адреса нельзя использовать как источник')
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address and not address.is_global:
+        raise ValueError('Локальные адреса нельзя использовать как источник')
+    return value
+
+
+def custom_source_id(url):
+    return 'custom-' + hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+class CustomSource(BaseModel):
+    id: str = ''
+    name: str = Field(min_length=1, max_length=100)
+    url: str = Field(max_length=500)
+    home: str = Field(default='', max_length=500)
+    description: str = Field(default='Пользовательская RSS-лента', max_length=200)
+    custom: bool = True
+
+    @model_validator(mode='after')
+    def normalize(self):
+        self.url = custom_source_url(self.url)
+        self.name = re.sub(r'\s+', ' ', self.name).strip()
+        self.id = custom_source_id(self.url)
+        parsed = urlsplit(self.url)
+        self.home = f'{parsed.scheme}://{parsed.netloc}'
+        self.description = 'Пользовательская RSS-лента'
+        self.custom = True
+        return self
+
+
+class CustomSourceRequest(BaseModel):
+    name: str = Field(default='', max_length=100)
+    url: str = Field(max_length=500)
+
+
 class Settings(BaseModel):
     community_url: str = Field(default='', max_length=300)
     community_name: str = Field(min_length=1, max_length=100)
     style_notes: str = Field(max_length=3000)
     examples: str = Field(default='', max_length=12000)
     accent: str = '#476b51'
-    sources: list[str] = Field(min_length=1, max_length=2)
+    sources: list[str] = Field(min_length=1, max_length=32)
+    custom_sources: list[CustomSource] = Field(default_factory=list, max_length=10)
     topics: list[str] = Field(max_length=5)
     weekly_enabled: bool
     weekday: int = Field(ge=0, le=6)
@@ -185,7 +242,10 @@ class Settings(BaseModel):
 
     @model_validator(mode='after')
     def ids_valid(self):
-        if set(self.sources) - SOURCES.keys() or set(self.topics) - TOPICS.keys():
+        custom_ids = {source.id for source in self.custom_sources}
+        if len(custom_ids) != len(self.custom_sources):
+            raise ValueError('Один и тот же пользовательский источник добавлен несколько раз')
+        if set(self.sources) - (SOURCES.keys() | custom_ids) or set(self.topics) - TOPICS.keys():
             raise ValueError('Неизвестный источник или тема')
         return self
 
@@ -225,6 +285,18 @@ def current_user(request: Request):
 
 def public_user(user):
     return {key: user[key] for key in ('id', 'name', 'email', 'username')}
+
+
+def settings_for(user):
+    return DEFAULT_SETTINGS | json.loads(user['settings'])
+
+
+def source_catalog(settings=None):
+    catalog = {key: value | {'custom': False} for key, value in SOURCES.items()}
+    for source in (settings or {}).get('custom_sources', []):
+        item = source.model_dump() if isinstance(source, CustomSource) else source
+        catalog[item['id']] = item
+    return catalog
 
 
 def auth_limit(request, email):
@@ -323,10 +395,32 @@ def logout(request: Request, response: Response):
 
 @app.get('/api/me')
 def me(user=Depends(current_user)):
+    settings = settings_for(user)
     with db() as con:
         stats = dict(con.execute('SELECT min(published) AS oldest, max(published) AS newest, count(*) AS count FROM articles').fetchone())
         meta = con.execute("SELECT value FROM meta WHERE key='collection' ").fetchone()
-    return {'user': public_user(user), 'settings': json.loads(user['settings']), 'next_run': user['next_run'], 'ai_enabled': ai_available(), 'ai_provider': ai_provider(), 'ai_model': ai_model(), 'sources': SOURCES, 'topics': {k: v[0] for k, v in TOPICS.items()}, 'archive': stats, 'collection': json.loads(meta['value']) if meta else None, 'today': now().astimezone(TZ).date().isoformat()}
+    return {'user': public_user(user), 'settings': settings, 'next_run': user['next_run'], 'ai_enabled': ai_available(), 'ai_provider': ai_provider(), 'ai_model': ai_model(), 'sources': source_catalog(settings), 'topics': {k: v[0] for k, v in TOPICS.items()}, 'archive': stats, 'collection': json.loads(meta['value']) if meta else None, 'today': now().astimezone(TZ).date().isoformat()}
+
+
+@app.post('/api/sources/preview')
+def preview_source(body: CustomSourceRequest, user=Depends(current_user)):
+    try:
+        candidate = CustomSource(name=body.name or urlsplit(body.url).hostname or 'RSS', url=body.url)
+    except (ValueError, TypeError):
+        raise HTTPException(422, 'Не удалось прочитать RSS/Atom. Проверьте HTTPS-ссылку и доступность ленты.')
+    known_urls = {source['url'].rstrip('/') for source in source_catalog(settings_for(user)).values()}
+    if candidate.url.rstrip('/') in known_urls:
+        raise HTTPException(409, 'Этот источник уже есть в списке.')
+    try:
+        raw = fetch_public(candidate.url, limit=2_000_000, allowed_hosts=None, https_only=True)
+        feed = feedparser.parse(raw)
+        entries = parse_feed(raw, candidate.id)
+        if not body.name.strip():
+            candidate.name = plain(feed.feed.get('title', ''))[:100] or candidate.name
+        return candidate.model_dump() | {'count': len(entries)}
+    except Exception as exc:
+        log.warning('Custom RSS preview failed: %s', type(exc).__name__)
+        raise HTTPException(422, 'Не удалось прочитать RSS/Atom. Проверьте HTTPS-ссылку и доступность ленты.')
 
 
 @app.put('/api/settings')
@@ -336,7 +430,7 @@ def save_settings(body: Settings, user=Depends(current_user)):
     with db() as con:
         con.execute('UPDATE users SET settings=?,next_run=? WHERE id=?', (json.dumps(settings, ensure_ascii=False), schedule, user['id']))
     wake.set()
-    return {'settings': settings, 'next_run': schedule}
+    return {'settings': settings, 'next_run': schedule, 'sources': source_catalog(settings)}
 
 
 def insert_job(con, user_id, dates, kind, settings):
@@ -407,13 +501,27 @@ def topic_for(text):
     return max(scores, key=scores.get) if max(scores.values()) else 'other'
 
 
-def fetch_public(url, limit=8_000_000):
-    # Only publisher hosts; user-entered community URLs never cause server requests.
-    for _ in range(4):
-        parsed = urlsplit(url)
-        if parsed.scheme not in {'http', 'https'} or parsed.username or parsed.password or parsed.port not in {None, 80, 443} or parsed.hostname not in {'naked-science.ru', 'www.naked-science.ru', 'elementy.ru', 'www.elementy.ru'}:
+def validate_remote_url(url, allowed_hosts=BUILTIN_HOSTS, https_only=False):
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or '').lower().rstrip('.')
+    schemes = {'https'} if https_only else {'http', 'https'}
+    if parsed.scheme not in schemes or not hostname or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+        raise ValueError('Некорректный адрес источника')
+    if allowed_hosts is not None:
+        if hostname not in allowed_hosts:
             raise ValueError('Источник файла не входит в список разрешённых')
-        with httpx.stream('GET', url, timeout=25, follow_redirects=False, headers={'User-Agent': 'SNO-Newsroom/1.0 (+RSS reader)'}) as response:
+        return url
+    addresses = {item[4][0].split('%')[0] for item in socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+        raise ValueError('Источник ведёт на локальный или служебный адрес')
+    return url
+
+
+def fetch_public(url, limit=8_000_000, allowed_hosts=BUILTIN_HOSTS, https_only=False):
+    # Custom feeds and their images may use any public host, but never local networks.
+    for _ in range(4):
+        validate_remote_url(url, allowed_hosts, https_only)
+        with httpx.stream('GET', url, timeout=25, follow_redirects=False, trust_env=False, headers={'User-Agent': 'SNO-Newsroom/1.0 (+RSS reader)'}) as response:
             if response.is_redirect:
                 url = urljoin(url, response.headers['location'])
                 continue
@@ -456,9 +564,20 @@ def parse_feed(raw, source):
 
 def collect():
     report = {'at': now().isoformat(), 'sources': {}}
-    for key in SOURCES:
+    catalog = source_catalog()
+    with db() as con:
+        for row in con.execute('SELECT settings FROM users'):
+            try:
+                settings = DEFAULT_SETTINGS | json.loads(row['settings'])
+                for key, source in source_catalog(settings).items():
+                    if source.get('custom') and key in settings['sources']:
+                        catalog[key] = source
+            except (ValueError, TypeError, KeyError):
+                log.warning('Skipped invalid custom source settings')
+    for key, source in catalog.items():
         try:
-            entries = parse_feed(fetch_public(SOURCES[key]['url']), key)
+            allowed = None if source.get('custom') else BUILTIN_HOSTS
+            entries = parse_feed(fetch_public(source['url'], allowed_hosts=allowed, https_only=bool(source.get('custom'))), key)
             with db() as con:
                 con.executemany('INSERT INTO articles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,summary=excluded.summary,image=excluded.image,credit=excluded.credit', entries)
             report['sources'][key] = {'ok': True, 'count': len(entries)}
@@ -548,7 +667,8 @@ def edit_with_ai(source):
 
 def write_post(articles, settings, job):
     header = f"Наука рядом: открытия {date.fromisoformat(job['date_from']):%d.%m}–{date.fromisoformat(job['date_to']):%d.%m.%Y}"
-    sources = '\n'.join(f"{i}. {SOURCES[a['source']]['name']} · {datetime.fromisoformat(a['published']).astimezone(TZ):%d.%m.%Y}\n{a['url']}" for i, a in enumerate(articles, 1))
+    catalog = source_catalog(settings)
+    sources = '\n'.join(f"{i}. {catalog.get(a['source'], {'name': a['source']})['name']} · {datetime.fromisoformat(a['published']).astimezone(TZ):%d.%m.%Y}\n{a['url']}" for i, a in enumerate(articles, 1))
     text = header + '\n\n' + '\n\n'.join(f"{i}. {a['title']}\n{excerpt(a['summary'])}" for i, a in enumerate(articles, 1)) + '\n\nКакое открытие обсудим на следующей встрече СНО?\n\n#СНО #НовостиНауки #НаукаРядом'
     mode, warning = 'digest', ''
     if ai_provider() != 'none':
@@ -599,7 +719,7 @@ def make_files(jid, articles, settings, job, body):
         if not article['image']:
             continue
         try:
-            raw = fetch_public(article['image'], limit=12_000_000)
+            raw = fetch_public(article['image'], limit=12_000_000, allowed_hosts=None)
             with Image.open(io.BytesIO(raw)) as original:
                 if original.width * original.height > 25_000_000:
                     raise ValueError('Image is too large')
@@ -641,14 +761,16 @@ def make_files(jid, articles, settings, job, body):
 
 
 def process_job(job):
-    settings = json.loads(job['settings'])
+    settings = DEFAULT_SETTINGS | json.loads(job['settings'])
     try:
         report = collect()
         articles = select_articles(job, settings)
-        warnings = [f"{SOURCES[key]['name']}: источник недоступен, использован сохранённый архив." for key in settings['sources'] if not report['sources'][key]['ok']]
+        catalog = source_catalog(settings)
+        unavailable = [key for key in settings['sources'] if not report['sources'].get(key, {}).get('ok')]
+        warnings = [f"{catalog.get(key, {'name': key})['name']}: источник недоступен, использован сохранённый архив." for key in unavailable]
         if not articles:
             message = 'За выбранные даты и темы в доступном архиве ничего не найдено. RSS содержит только часть последних публикаций; архив пополняется каждый час. Выберите другой период или темы.'
-            if all(not report['sources'][key]['ok'] for key in settings['sources']):
+            if len(unavailable) == len(settings['sources']):
                 message = 'Источники недоступны, а в архиве нет подходящих новостей. Повторите попытку позже.'
             with db() as con:
                 con.execute("UPDATE jobs SET status='empty',body=?,details=? WHERE id=?", (message, json.dumps({'warnings': warnings}), job['id']))
@@ -673,7 +795,7 @@ def enqueue_scheduled(at=None):
         con.execute('BEGIN IMMEDIATE')
         users = con.execute('SELECT * FROM users WHERE next_run IS NOT NULL AND next_run<=?', (at.isoformat(),)).fetchall()
         for user in users:
-            settings = json.loads(user['settings'])
+            settings = DEFAULT_SETTINGS | json.loads(user['settings'])
             if not settings['weekly_enabled']:
                 continue
             end = at.astimezone(TZ).date() - timedelta(days=1)
@@ -723,7 +845,7 @@ def service_worker():
 
 @app.get('/')
 def index():
-    return FileResponse(ROOT / 'static' / 'index.html')
+    return FileResponse(ROOT / 'static' / 'index.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
 
 
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
